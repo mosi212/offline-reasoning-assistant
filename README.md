@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Offline Reasoning Assistant
 
 An offline AI assistant powered by a local Large Language Model (LLM) that leverages **chain-of-thought (CoT) reasoning** for iterative problem analysis and solution generation. This project utilizes [Hugging Face Transformers](https://huggingface.co/transformers/), [Gradio](https://gradio.app/), and [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes) to provide an interactive and efficient experience.
