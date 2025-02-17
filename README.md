@@ -120,7 +120,4 @@ This project is licensed under the [MIT License](LICENSE).
 - [Gradio](https://gradio.app/)
 - [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes)
 ```
-=======
-# offline-reasoning-assistant
-Offline Reasoning Assistant is an offline AI assistant powered by a locally cached, quantized LLM. It utilizes chain-of-thought reasoning for iterative problem analysis and solution generation, with an interactive Gradio interface for easy user interaction.
->>>>>>> a4e4b060f0bc7a125fced3df45c89bfd80b88513
+
