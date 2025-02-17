@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Offline Reasoning Assistant
 
 An offline AI assistant powered by a local Large Language Model (LLM) that leverages **chain-of-thought (CoT) reasoning** for iterative problem analysis and solution generation. This project utilizes [Hugging Face Transformers](https://huggingface.co/transformers/), [Gradio](https://gradio.app/), and [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes) to provide an interactive and efficient experience.
@@ -120,3 +121,7 @@ This project is licensed under the [MIT License](LICENSE).
 - [Gradio](https://gradio.app/)
 - [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes)
 ```
+=======
+# offline-reasoning-assistant
+Offline Reasoning Assistant is an offline AI assistant powered by a locally cached, quantized LLM. It utilizes chain-of-thought reasoning for iterative problem analysis and solution generation, with an interactive Gradio interface for easy user interaction.
+>>>>>>> a4e4b060f0bc7a125fced3df45c89bfd80b88513
