@@ -1,0 +1,16 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment folders
+env/
+venv/
+.venv/
+
+# Local model cache (do not commit large model files)
+local_model/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
