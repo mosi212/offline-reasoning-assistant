@@ -4,19 +4,21 @@ import torch
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    pipeline,
+    TextIteratorStreamer,
     BitsAndBytesConfig
 )
+import transformers  # Import the entire module
+import threading
 import logging
-from typing import Tuple
+from typing import Tuple, Generator
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with debug level
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-MODEL_PATH = os.path.join("./local_model", MODEL_NAME)
-
+MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+# MODEL_NAME = "Qwen/Qwen2.5-7B"
+MODEL_PATH = os.path.join("../local_model", MODEL_NAME)
 
 class Agent:
     def __init__(self, model_name: str = MODEL_NAME, model_path: str = MODEL_PATH):
@@ -25,33 +27,45 @@ class Agent:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.logger = logger
 
-        # Initialize model components
+        # Combined chain-of-thought prompt template
+        self.cot_template = (
+            "Problem: {question}\n\n"
+            "Step 1: Analysis - Identify key components and initial parameters.\n"
+            "Assistant: <think> Provide a detailed analysis of the problem.\n\n"
+            "Step 2: Planning - Outline the solution steps and describe the approach.\n"
+            "Assistant: <think> Describe your solution plan in detail.\n\n"
+            "Step 3: Execution - Perform the calculations step-by-step and verify intermediate results.\n"
+            "Assistant: <think> Show all calculations and verify your results.\n\n"
+            "Step 4: Synthesis - Synthesize a concise final answer and reflect on consistency.\n"
+            "Assistant: Provide the final answer below."
+        )
+
+        self.logger.info("Initializing model components...")
         self.model, self.tokenizer = self._load_model()
-        self.pipe = self._create_pipeline()
+        # self.model = torch.compile(self.model)
+        self.pipe = self._create_pipeline()  # Now uses transformers.pipeline
         self.logger.info("Agent initialization complete")
 
-    def _load_model(self) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-        """Load model with 4-bit quantization, handle download if missing"""
-        try:
-            return self._load_local_model()
-        except Exception as e:
-            self.logger.warning(f"Local model load failed: {e}")
-            return self._download_and_cache_model()
-
-    def _load_local_model(self) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-        """Attempt to load locally cached model"""
-        self.logger.info(f"Loading local model from {self.model_path}")
-
-        quant_config = BitsAndBytesConfig(
+    def _get_quant_config(self) -> BitsAndBytesConfig:
+        return BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16
         )
 
+    def _load_model(self) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+        try:
+            return self._load_local_model()
+        except Exception as e:
+            self.logger.warning(f"Local model load failed: {e}. Downloading and caching model.")
+            return self._download_and_cache_model()
+
+    def _load_local_model(self) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+        self.logger.info(f"Loading local model from {self.model_path}")
+        quant_config = self._get_quant_config()
         model = AutoModelForCausalLM.from_pretrained(
             self.model_path,
             device_map="auto",
-            quantization_config=quant_config,
             attn_implementation="sdpa",
             trust_remote_code=True
         )
@@ -59,20 +73,12 @@ class Agent:
             self.model_path,
             trust_remote_code=True
         )
-
         self.logger.info("✅ Local model loaded successfully")
         return model, tokenizer
 
     def _download_and_cache_model(self) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-        """Download and cache model from Hugging Face Hub"""
         self.logger.info(f"Downloading {self.model_name} from Hugging Face Hub")
-
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16
-        )
-
+        quant_config = self._get_quant_config()
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             device_map="auto",
@@ -85,94 +91,71 @@ class Agent:
             self.model_name,
             trust_remote_code=True
         )
-
         os.makedirs(self.model_path, exist_ok=True)
         model.save_pretrained(self.model_path)
         tokenizer.save_pretrained(self.model_path)
         self.logger.info(f"💾 Model cached at {self.model_path}")
-
         return model, tokenizer
 
     def _create_pipeline(self):
-        """Create text generation pipeline with optimized settings"""
-        return pipeline(
+        """Create a text generation pipeline using transformers.pipeline."""
+        return transformers.pipeline(
             "text-generation",
             model=self.model,
             tokenizer=self.tokenizer,
             device_map="auto",
             max_new_tokens=4096,
             do_sample=True,
-            temperature=0.7,
+            temperature=0.6,
             top_p=0.9,
             repetition_penalty=1.1
         )
 
-    def generate_with_cot(self, prompt: str, iterations: int = 4) -> str:
-        """Chain-of-thought reasoning with iterative refinement"""
-        conversation_history = []
-        current_context = prompt
+    def _stream_generate_response(self, prompt: str, max_tokens: int) -> Generator[str, None, None]:
+        self.logger.info("Starting streaming generation.")
+        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
+        generation_kwargs = {
+            "input_ids": input_ids,
+            "max_new_tokens": max_tokens,
+            "do_sample": True,
+            "temperature": 0.6,
+            "top_p": 0.9,
+            "num_beams": 1,
+            "streamer": streamer,
+        }
+        thread = threading.Thread(target=self.model.generate, kwargs=generation_kwargs)
+        thread.start()
+        response = ""
+        for new_text in streamer:
+            response += new_text
+            yield response
+        thread.join()
+        self.logger.info("Streaming generation complete.")
 
-        for iteration in range(1, iterations + 1):
-            self.logger.info(f"CoT Iteration {iteration}/{iterations}")
-
-            response = self._generate_step(current_context, iteration)
-            cleaned_response = self._clean_response(response)
-
-            conversation_history.append(
-                f"## Iteration {iteration}:\n{cleaned_response}"
-            )
-            current_context = self._update_context(current_context, cleaned_response)
-
-        return "\n\n".join(conversation_history)
-
-    def _generate_step(self, context: str, iteration: int) -> str:
-        """Generate a single CoT step"""
-        system_prompt = """[INST] You are an AI assistant that uses chain-of-thought reasoning.
-        Follow these steps:
-        1. Carefully analyze the problem
-        2. Break it into logical components
-        3. Solve each component systematically
-        4. Synthesize a comprehensive answer based on this chain-of-thoughts[/INST]"""
-
-        prompt = f"{system_prompt}\n\nUser: {context}\nAssistant: Let's think step by step."
-
-        return self.pipe(
-            prompt,
-            num_return_sequences=1,
-            pad_token_id=self.tokenizer.eos_token_id
-        )[0]['generated_text']
-
-    def _clean_response(self, response: str) -> str:
-        """Clean and extract the assistant's response"""
-        return response.split("Assistant:")[-1].strip()
-
-    def _update_context(self, previous_context: str, response: str) -> str:
-        """Update context for next iteration"""
-        return f"{previous_context}\n\nPrevious analysis:\n{response}\nHow can we improve this?"
-
+    def generate_with_cot(self, prompt: str) -> Generator[str, None, None]:
+        original_question = prompt.strip()
+        combined_prompt = self.cot_template.format(question=original_question)
+        self.logger.info(f"Combined prompt:\n{combined_prompt}")
+        yield from self._stream_generate_response(combined_prompt, max_tokens=4096)
 
 def create_interface():
     agent = Agent()
 
-    def chat_interface(message: str) -> tuple[str, str]:
-        """Gradio interface function with error handling"""
+    def chat_interface(message: str) -> Generator[str, None, None]:
         try:
-            process = agent.generate_with_cot(message)
-
-            # Extract final answer (last iteration's response)
-            final_answer = process.split("## Iteration")[-1].split("\n", 1)[-1].strip()
-            return process, final_answer
-
+            yield from agent.generate_with_cot(message)
         except Exception as e:
-            logger.error(f"Generation error: {e}")
-            return f"❌ Error: {str(e)}", ""
+            logger.exception("Generation error:")
+            yield f"❌ Error: {str(e)}"
 
     with gr.Blocks(theme=gr.themes.Soft(primary_hue="emerald", font=[gr.themes.GoogleFont("Inter")])) as interface:
-        gr.Markdown("""
-        # 🧠 Offline Reasoning Assistant
-        *Chain-of-Thought AI Powered by LOCAL LLM*
-        """)
-
+        gr.Markdown(
+            """
+            # 🧠 Offline Reasoning Assistant
+            *Single-Iteration Streaming Chain-of-Thought AI Powered by LOCAL LLM*
+            """
+        )
         with gr.Row():
             with gr.Column(scale=1):
                 gr.Markdown("### 📥 Input")
@@ -185,47 +168,27 @@ def create_interface():
                 submit_btn = gr.Button("Analyze", variant="primary")
                 gr.Examples(
                     examples=[
-                        ["Explain quantum computing in simple terms"],
-                        ["How to solve a quadratic equation?"],
-                        ["What are the main causes of climate change?"]
+                        ["Solve for x in the quadratic equation: 2x^2 - 8x + 6 = 0"],
+                        ["A rectangle has a length 4 times its width and an area of 64. Find its dimensions."],
+                        ["Explain quantum computing in simple terms"]
                     ],
                     inputs=input_box,
                     label="Example Questions"
                 )
-
             with gr.Column(scale=2):
-                gr.Markdown("### 🔍 Reasoning Process")
-                process_view = gr.Markdown(
-                    label="Thinking Steps",
-                    value="*Processing steps will appear here...*",
+                gr.Markdown("### 🔍 Output")
+                output_view = gr.Markdown(
+                    label="Output",
+                    value="*The chain-of-thought reasoning will stream here...*",
                     elem_classes="process-box"
                 )
-
-                gr.Markdown("### 💡 Final Answer")
-                answer_view = gr.Markdown(
-                    label="Final Answer",
-                    value="*Final answer will appear here...*",
-                    elem_classes="answer-box"
-                )
-
-        submit_btn.click(
-            fn=chat_interface,
-            inputs=input_box,
-            outputs=[process_view, answer_view]
-        )
-
-    # Add custom CSS
+        submit_btn.click(fn=chat_interface, inputs=input_box, outputs=output_view)
     interface.css = """
     .input-box textarea { font-size: 16px !important; padding: 15px !important; }
     .process-box { background: #1b1c1b; padding: 20px; border-radius: 10px; border: 1px solid #dee2e6; }
-    .answer-box { background: #1d3e19; padding: 25px; border-radius: 10px; border: 2px solid #0d6efd; }
-    .process-box markdown { color: #495057; line-height: 1.6; }
-    .answer-box markdown { font-size: 18px; color: #0a58ca; }
     footer { display: none !important; }
     """
-
     return interface
-
 
 if __name__ == "__main__":
     try:
@@ -240,6 +203,6 @@ if __name__ == "__main__":
         logger.error(f"Port error: {e}")
         interface.launch(
             server_name="0.0.0.0",
-            server_port=0,  # Auto-select port
+            server_port=0,
             show_error=True
         )
